@@ -25,7 +25,7 @@ test('folded and escaped description round-trips', () => {
   const g = groups['AAMkAGRlY2Ix-recurring-1'];
   const res = gs.buildEventResource(g.master, parsed.tzMap, 'AAMkAGRlY2Ix-recurring-1', 'h');
   assert.equal(res.description,
-    'Hi Jonathan! See you tomorrow at noon in INFO.\n');
+    'Agenda: review the draft, then plan next steps. Bring your laptop and arrive early.\n');
 });
 
 test('Windows TZID maps to IANA on start and end', () => {
@@ -139,6 +139,12 @@ test('UTC offset strings parse with and without colons', () => {
 
 test('unknown TZID falls back to the default zone', () => {
   assert.equal(gs.mapTzid('Totally Unknown Zone', {}), 'America/Denver');
+});
+
+test('color fields are omitted by default (calendar default color applies)', () => {
+  const res = gs.buildEventResource(groups['all-day-1'].master, parsed.tzMap, 'u', 'h');
+  assert.equal('colorId' in res, false);
+  assert.equal('eventLabelId' in res, false);
 });
 
 test('past-event guard: ended events read as past, ongoing series do not', () => {

@@ -30,7 +30,8 @@ TZOFFSETTO:-0600
 END:DAYLIGHT
 END:VTIMEZONE
 BEGIN:VEVENT
-DESCRIPTION:Hi Jonathan! See you tomorrow at noon in INFO.\n
+DESCRIPTION:Agenda: review the draft\, then plan next steps. Bring your lap
+ top and arrive early.\n
 UID:AAMkAGRlY2Ix-recurring-1
 SUMMARY:Weekly advising
 DTSTART;TZID=Mountain Standard Time:20260814T110000

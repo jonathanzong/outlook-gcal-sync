@@ -64,7 +64,13 @@ To uninstall, run `removeTriggersAndSyncedEvents`, which deletes the trigger and
 | `DEFAULT_IANA_TZ` | `'America/Denver'` | Fallback zone for unmappable TZIDs and floating times. |
 | `USE_DEFAULT_REMINDERS` | `false` | `false` suppresses reminders on synced events. |
 | `TITLE_PREFIX` | `''` | Optional prefix for synced titles, e.g. `'[work] '`. |
+| `EVENT_LABEL_ID` | `''` | Event-label id for synced events — the current palette (24 named colors such as Mango, plus custom RGB shades). Label ids are per-calendar: run `listEventLabels()` once and copy the id from the log. Wins over `EVENT_COLOR_ID`. |
+| `EVENT_COLOR_ID` | `''` | Classic colorId `'1'`–`'11'`. `''` on both color settings keeps the calendar's default color. |
 | `DELETE_PAST_EVENTS` | `false` | `false` keeps ended events on Google when they age out of Outlook's published window; `true` deletes them. |
+
+The presentation settings (`TITLE_PREFIX`, `EVENT_COLOR_ID`, `EVENT_LABEL_ID`, `USE_DEFAULT_REMINDERS`) feed the change-detection hash, so editing one re-writes every synced event on the next run rather than applying only to events that later change in Outlook.
+
+Google reworked event colors in June 2026: the UI now offers 24 named colors plus a custom RGB picker, and the API models the new palette as per-calendar event labels (`eventLabelId` on the event, superseding the index-based `colorId`). The classic `colorId` values still work but only reach the original 11 colors. Two API quirks make labels easy to lose silently: the API only processes `eventLabelId` when the request URL carries `eventLabelVersion=1`, and `Events.import` ignores the field entirely. The script therefore passes the version parameter on every update and applies the label with a follow-up `patch` after each import.
 
 ## Development
 

@@ -68,6 +68,19 @@ var USE_DEFAULT_REMINDERS = false;
 // Optional prefix for synced event titles, e.g. '[work] '. '' = none.
 var TITLE_PREFIX = '';
 
+// Color for synced events, two systems:
+//  - EVENT_LABEL_ID reaches the full current palette (the 24 named colors
+//    such as Mango, and custom RGB shades), which the API models as event
+//    labels. Label IDs are per-calendar: run listEventLabels() once, find
+//    the label whose name/color you want in the execution log, and paste
+//    its id here. Takes precedence over EVENT_COLOR_ID when set.
+//  - EVENT_COLOR_ID is the classic index palette, '1'–'11': 1 Lavender,
+//    2 Sage, 3 Grape, 4 Flamingo, 5 Banana, 6 Tangerine, 7 Peacock,
+//    8 Graphite, 9 Blueberry, 10 Basil, 11 Tomato.
+// Leave both '' for the calendar's default color.
+var EVENT_LABEL_ID = '';
+var EVENT_COLOR_ID = '';
+
 // Outlook only publishes a rolling window (~6 months back). When a past
 // event ages out of that window it disappears from the feed; false keeps
 // such events on Google as history, true deletes them along with genuinely
@@ -265,6 +278,22 @@ function removeTriggersAndSyncedEvents() {
   console.log('Removed trigger and ' + Object.keys(existing).length + ' synced events.');
 }
 
+/**
+ * Run by hand to find the id for EVENT_LABEL_ID. Logs the target calendar's
+ * event labels — the entries behind the current color palette (named colors
+ * such as Mango, plus any custom shades). If nothing is logged, color one
+ * event with the wanted color in the Calendar UI first, then rerun.
+ */
+function listEventLabels() {
+  var cal = Calendar.Calendars.get(TARGET_CALENDAR_ID);
+  var labels = cal.labelProperties && cal.labelProperties.eventLabels;
+  if (!labels || labels.length === 0) {
+    console.log('No event labels found on this calendar yet. In the Calendar UI, set one event to the color you want, then run this again.');
+    return;
+  }
+  labels.forEach(function (l) { console.log(JSON.stringify(l)); });
+}
+
 /** Main sync. Runs on the timer. */
 function sync() {
   var lock = LockService.getScriptLock();
@@ -381,13 +410,22 @@ function syncOneGroup_(uid, group, tzMap, existing, stats) {
 
   var resource = buildEventResource(group.master, tzMap, uid, hash);
 
+  // The API only processes eventLabelId when the request carries
+  // eventLabelVersion=1, and import() does not process it at all — hence
+  // the follow-up patch on the create path.
+  var labelArgs = EVENT_LABEL_ID ? { eventLabelVersion: 1 } : {};
   var saved;
   if (prior) {
     resource.id = prior.id;
-    saved = Calendar.Events.update(resource, TARGET_CALENDAR_ID, prior.id);
+    saved = Calendar.Events.update(resource, TARGET_CALENDAR_ID, prior.id, labelArgs);
     stats.updated++;
   } else {
     saved = Calendar.Events.import(resource, TARGET_CALENDAR_ID);
+    if (EVENT_LABEL_ID) {
+      saved = Calendar.Events.patch(
+        { eventLabelId: String(EVENT_LABEL_ID) },
+        TARGET_CALENDAR_ID, saved.id, labelArgs);
+    }
     stats.created++;
   }
 
@@ -428,7 +466,9 @@ function patchOverride_(masterEvent, override, tzMap, stats) {
     instance.transparency = patch.transparency;
     instance.status = 'confirmed';
   }
-  Calendar.Events.update(instance, TARGET_CALENDAR_ID, instance.id);
+  if (EVENT_LABEL_ID) instance.eventLabelId = String(EVENT_LABEL_ID);
+  Calendar.Events.update(instance, TARGET_CALENDAR_ID, instance.id,
+    EVENT_LABEL_ID ? { eventLabelVersion: 1 } : {});
   stats.overridesPatched++;
 }
 
@@ -463,6 +503,9 @@ function buildEventResource(vevent, tzMap, uid, hash) {
       (getProp(vevent, 'TRANSP') && getProp(vevent, 'TRANSP').value === 'TRANSPARENT')
         ? 'transparent' : 'opaque'
   };
+
+  if (EVENT_LABEL_ID) resource.eventLabelId = String(EVENT_LABEL_ID);
+  else if (EVENT_COLOR_ID) resource.colorId = String(EVENT_COLOR_ID);
 
   var recurrence = buildRecurrence(vevent, tzMap, start.timeZone);
   if (recurrence.length > 0) resource.recurrence = recurrence;
@@ -723,13 +766,17 @@ function groupByUid(events) {
 
 /**
  * Hash of a UID group's content, used to skip unchanged events. DTSTAMP is
- * excluded because Outlook regenerates it on every publish.
+ * excluded because Outlook regenerates it on every publish. The
+ * presentation config feeds the hash too, so changing TITLE_PREFIX,
+ * EVENT_COLOR_ID, or USE_DEFAULT_REMINDERS re-writes every event on the
+ * next run instead of applying only to events that later change.
  */
 function contentHash_(group) {
   var texts = [];
   if (group.master) texts.push(group.master.raw);
   group.overrides.forEach(function (ov) { texts.push(ov.raw); });
-  var clean = texts.join('\n---\n').replace(/^DTSTAMP:.*$/gm, '');
+  var clean = texts.join('\n---\n').replace(/^DTSTAMP:.*$/gm, '') +
+    '\ncfg2:' + [TITLE_PREFIX, EVENT_COLOR_ID, EVENT_LABEL_ID, USE_DEFAULT_REMINDERS].join('|');
   var bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, clean, Utilities.Charset.UTF_8);
   return bytes.map(function (b) { return ((b + 256) % 256).toString(16); }).join('');
 }
