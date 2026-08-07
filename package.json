@@ -1,0 +1,13 @@
+{
+  "name": "outlook-gcal-sync",
+  "version": "1.0.0",
+  "description": "One-way sync from a published Outlook (Exchange) ICS feed into Google Calendar, as a Google Apps Script.",
+  "private": true,
+  "scripts": {
+    "test": "node --test test/test.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}
