@@ -32,6 +32,8 @@ The script also never expands recurrences. The RRULE line passes to Google verba
 
 **Modified occurrences (RECURRENCE-ID).** After the master syncs, each override finds its Google instance via `Events.instances` with `originalStart`, then patches that instance's time, title, location, and description. An override with `STATUS:CANCELLED` cancels the single instance instead.
 
+**Recurring exceptions in the event list.** `Events.list` with the default `singleEvents=false` returns single events, recurring masters, *and* exceptions (modified occurrences). An exception inherits its master's extended properties, so it carries this script's ownership tag and UID as well. The lookup therefore skips anything with a `recurringEventId` and keeps only masters: an exception has no `recurrence` field, and updating one with a recurrence-bearing resource fails with `Invalid start time`. If an update fails anyway, the script deletes its own copy and reimports it rather than leaving the event stale.
+
 **Orphan overrides.** Outlook sometimes publishes an override whose master falls outside the published window. Each orphan syncs as a standalone event under a synthetic UID (`uid + '/' + recurrenceId`), so it still appears and still deletes cleanly later.
 
 **Cancelled events.** Exchange rarely publishes `STATUS:CANCELLED`. A cancelled meeting stays `STATUS:CONFIRMED` and is marked instead by a title prefix ("Canceled: Staff sync"), usually alongside `TRANSP:TRANSPARENT` and `X-MICROSOFT-CDO-BUSYSTATUS:FREE`. The script treats either signal as a cancellation: a matching master deletes the whole series from Google, and a matching override cancels that single occurrence. The prefix is server-language dependent, so `CANCELLED_TITLE_PATTERN` is configurable. The pattern anchors at the start of the title, so a meeting *about* cancellations keeps syncing. The free/busy flags are deliberately not used as the signal, because an event you legitimately marked "free" carries the same flags.
@@ -50,6 +52,8 @@ Every event the script creates carries a private tag (`icsSyncTag`), and the del
 2. In the left sidebar, click **+** next to **Services** and add **Google Calendar API** (keep the identifier `Calendar`).
 3. In **Project Settings → Script Properties**, add a property `ICS_URL` with your published Outlook calendar URL. The URL lives in Script Properties rather than in the code because it is a capability: anyone holding it can read your calendar, so it must stay out of the repo.
 4. Select `setup` in the function dropdown and run it. Grant the permission prompts. This performs the first sync and installs a trigger that runs `sync` every `SYNC_INTERVAL_MINUTES`.
+
+Run `resyncAll` to delete every synced event and rebuild it from the feed, which clears out copies an older version of the script wrote incorrectly. The trigger stays installed.
 
 To uninstall, run `removeTriggersAndSyncedEvents`, which deletes the trigger and every event the script created.
 

@@ -302,6 +302,26 @@ function listEventLabels() {
   labels.forEach(function (l) { console.log(JSON.stringify(l)); });
 }
 
+/**
+ * Run by hand to rebuild every synced event from scratch. Deletes the
+ * events this script owns, then syncs. Use after changing settings that
+ * only apply at creation time, or to clear out events an older version of
+ * the script wrote incorrectly. The trigger is left in place.
+ */
+function resyncAll() {
+  var managed = listManagedEvents_();
+  var uids = Object.keys(managed);
+  uids.forEach(function (uid) {
+    try {
+      Calendar.Events.remove(TARGET_CALENDAR_ID, managed[uid].id);
+    } catch (e) {
+      console.warn('Could not remove ' + uid + ': ' + e);
+    }
+  });
+  console.log('Removed ' + uids.length + ' synced events; rebuilding from the feed.');
+  sync();
+}
+
 /** Main sync. Runs on the timer. */
 function sync() {
   var lock = LockService.getScriptLock();
@@ -437,21 +457,37 @@ function syncOneGroup_(uid, group, tzMap, existing, stats) {
   var saved;
   if (prior) {
     resource.id = prior.id;
-    saved = Calendar.Events.update(resource, TARGET_CALENDAR_ID, prior.id, labelArgs);
+    try {
+      saved = Calendar.Events.update(resource, TARGET_CALENDAR_ID, prior.id, labelArgs);
+    } catch (e) {
+      // The stored copy cannot accept this resource (a shape Google will not
+      // convert in place, or a copy an earlier version of this script wrote
+      // wrongly). Replace it: the script owns every event it deletes here.
+      console.warn('Update of ' + uid + ' failed (' + e + '); replacing the event.');
+      try { Calendar.Events.remove(TARGET_CALENDAR_ID, prior.id); } catch (e2) {}
+      delete resource.id;
+      saved = createEvent_(resource, labelArgs);
+    }
     stats.updated++;
   } else {
-    saved = Calendar.Events.import(resource, TARGET_CALENDAR_ID);
-    if (EVENT_LABEL_ID) {
-      saved = Calendar.Events.patch(
-        { eventLabelId: String(EVENT_LABEL_ID) },
-        TARGET_CALENDAR_ID, saved.id, labelArgs);
-    }
+    saved = createEvent_(resource, labelArgs);
     stats.created++;
   }
 
   group.overrides.forEach(function (ov) {
     patchOverride_(saved, ov, tzMap, stats);
   });
+}
+
+/** Imports one event, then applies the label (import ignores labels). */
+function createEvent_(resource, labelArgs) {
+  var saved = Calendar.Events.import(resource, TARGET_CALENDAR_ID);
+  if (EVENT_LABEL_ID) {
+    saved = Calendar.Events.patch(
+      { eventLabelId: String(EVENT_LABEL_ID) },
+      TARGET_CALENDAR_ID, saved.id, labelArgs);
+  }
+  return saved;
 }
 
 /** Applies a RECURRENCE-ID override onto one instance of a recurring event. */
@@ -801,6 +837,16 @@ function contentHash_(group) {
 }
 
 /** Every event this script has written into the target calendar, by icsUid. */
+function isOwnedMaster_(event) {
+  if (!getPrivateProp_(event, 'icsUid')) return false;
+  // A modified occurrence of a recurring event ("exception") inherits its
+  // master's extended properties, so it carries this script's tag and UID
+  // too, and Events.list returns it alongside the master. Only the master
+  // may receive an update carrying a recurrence field; sending one to an
+  // exception fails with "Invalid start time".
+  return !event.recurringEventId;
+}
+
 function listManagedEvents_() {
   var byUid = {};
   var pageToken = null;
@@ -808,12 +854,13 @@ function listManagedEvents_() {
     var page = Calendar.Events.list(TARGET_CALENDAR_ID, {
       privateExtendedProperty: 'icsSyncTag=' + SYNC_TAG,
       showDeleted: false,
+      singleEvents: false,
       maxResults: 2500,
       pageToken: pageToken
     });
     (page.items || []).forEach(function (ev) {
-      var uid = getPrivateProp_(ev, 'icsUid');
-      if (uid) byUid[uid] = ev;
+      if (!isOwnedMaster_(ev)) return;
+      byUid[getPrivateProp_(ev, 'icsUid')] = ev;
     });
     pageToken = page.nextPageToken;
   } while (pageToken);

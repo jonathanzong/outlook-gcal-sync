@@ -171,6 +171,18 @@ test('color fields are omitted by default (calendar default color applies)', () 
   assert.equal('eventLabelId' in res, false);
 });
 
+test('ownership check keeps masters and rejects recurring exceptions', () => {
+  const tagged = { extendedProperties: { private: { icsSyncTag: 'outlook-ics-sync', icsUid: 'u1' } } };
+  assert.equal(gs.isOwnedMaster_(tagged), true);
+  // A modified occurrence inherits the master's extended properties, so it
+  // carries the same tag and UID; updating it with a recurrence-bearing
+  // resource fails with "Invalid start time".
+  const exception = Object.assign({ recurringEventId: 'abc123' }, tagged);
+  assert.equal(gs.isOwnedMaster_(exception), false);
+  // An event the user created themselves is never touched.
+  assert.equal(gs.isOwnedMaster_({ summary: 'Dinner' }), false);
+});
+
 test('past-event guard: ended events read as past, ongoing series do not', () => {
   const cutoff = Date.UTC(2026, 7, 7); // 2026-08-07
   assert.equal(gs.eventEndedBefore_(

@@ -63,7 +63,7 @@ function loadGs() {
              icsTimeToGoogle, mapTzid, normalizeUntil_, contentHash_,
              toRfc3339_, addDuration_, unescapeIcsText, unfoldIcsLines,
              localToUtc_, parseIcsDateTime_, parseUtcOffsetMinutes_,
-             eventEndedBefore_, isCancelled_, getProp };`
+             eventEndedBefore_, isCancelled_, getProp, isOwnedMaster_ };`
   );
   return loader(Utilities, console, PropertiesService);
 }
