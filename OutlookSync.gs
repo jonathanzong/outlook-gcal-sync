@@ -81,6 +81,14 @@ var TITLE_PREFIX = '';
 var EVENT_LABEL_ID = '';
 var EVENT_COLOR_ID = '';
 
+// Exchange publishes a cancelled meeting as a still-CONFIRMED event whose
+// title it prefixes ("Canceled: Staff sync"), so STATUS:CANCELLED alone
+// misses most cancellations. Any title matching this pattern is treated as
+// cancelled and kept off Google. The wording is server-language dependent;
+// extend the pattern for a non-English tenant, or set it to null to rely on
+// STATUS alone.
+var CANCELLED_TITLE_PATTERN = /^\s*cancell?ed:\s*/i;
+
 // Outlook only publishes a rolling window (~6 months back). When a past
 // event ages out of that window it disappears from the feed; false keeps
 // such events on Google as history, true deletes them along with genuinely
@@ -378,12 +386,24 @@ function syncLocked_() {
 
 // --------------------------- PER-EVENT SYNC ----------------------------
 
+/**
+ * True when a VEVENT represents a cancelled meeting, by either signal
+ * Exchange uses: an explicit STATUS:CANCELLED, or the title prefix it
+ * writes onto cancellations that keep STATUS:CONFIRMED.
+ */
+function isCancelled_(vevent) {
+  var status = getProp(vevent, 'STATUS');
+  if (status && status.value.toUpperCase() === 'CANCELLED') return true;
+  if (!CANCELLED_TITLE_PATTERN) return false;
+  var summary = getProp(vevent, 'SUMMARY');
+  return !!summary && CANCELLED_TITLE_PATTERN.test(unescapeIcsText(summary.value));
+}
+
 function syncOneGroup_(uid, group, tzMap, existing, stats) {
   var prior = existing[uid];
 
   // A cancelled master means the whole series is gone.
-  if (group.master && group.master.props['STATUS'] &&
-      group.master.props['STATUS'][0].value.toUpperCase() === 'CANCELLED') {
+  if (group.master && isCancelled_(group.master)) {
     if (prior) {
       Calendar.Events.remove(TARGET_CALENDAR_ID, prior.id);
       stats.deleted++;
@@ -453,8 +473,7 @@ function patchOverride_(masterEvent, override, tzMap, stats) {
   }
   var instance = instances.items[0];
 
-  var status = getProp(override, 'STATUS');
-  if (status && status.value.toUpperCase() === 'CANCELLED') {
+  if (isCancelled_(override)) {
     instance.status = 'cancelled';
   } else {
     var patch = buildEventResource(override, tzMap, null, null);

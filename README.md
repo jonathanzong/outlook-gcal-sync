@@ -34,7 +34,7 @@ The script also never expands recurrences. The RRULE line passes to Google verba
 
 **Orphan overrides.** Outlook sometimes publishes an override whose master falls outside the published window. Each orphan syncs as a standalone event under a synthetic UID (`uid + '/' + recurrenceId`), so it still appears and still deletes cleanly later.
 
-**Cancelled events.** A master with `STATUS:CANCELLED` deletes the whole series from Google.
+**Cancelled events.** Exchange rarely publishes `STATUS:CANCELLED`. A cancelled meeting stays `STATUS:CONFIRMED` and is marked instead by a title prefix ("Canceled: Staff sync"), usually alongside `TRANSP:TRANSPARENT` and `X-MICROSOFT-CDO-BUSYSTATUS:FREE`. The script treats either signal as a cancellation: a matching master deletes the whole series from Google, and a matching override cancels that single occurrence. The prefix is server-language dependent, so `CANCELLED_TITLE_PATTERN` is configurable. The pattern anchors at the start of the title, so a meeting *about* cancellations keeps syncing. The free/busy flags are deliberately not used as the signal, because an event you legitimately marked "free" carries the same flags.
 
 **All-day events and durations.** `VALUE=DATE` events map to Google's all-day form; the exclusive DTEND convention is the same on both sides, so dates pass through. An event with a DURATION instead of a DTEND gets its end computed on the real instant (in milliseconds), then converted back to wall time in the event's zone.
 
@@ -66,6 +66,7 @@ To uninstall, run `removeTriggersAndSyncedEvents`, which deletes the trigger and
 | `TITLE_PREFIX` | `''` | Optional prefix for synced titles, e.g. `'[work] '`. |
 | `EVENT_LABEL_ID` | `''` | Event-label id for synced events — the current palette (24 named colors such as Mango, plus custom RGB shades). Label ids are per-calendar: run `listEventLabels()` once and copy the id from the log. Wins over `EVENT_COLOR_ID`. |
 | `EVENT_COLOR_ID` | `''` | Classic colorId `'1'`–`'11'`. `''` on both color settings keeps the calendar's default color. |
+| `CANCELLED_TITLE_PATTERN` | `/^\s*cancell?ed:\s*/i` | Titles matching this are treated as cancelled meetings and kept off Google. Set to `null` to rely on `STATUS:CANCELLED` alone. |
 | `DELETE_PAST_EVENTS` | `false` | `false` keeps ended events on Google when they age out of Outlook's published window; `true` deletes them. |
 
 The presentation settings (`TITLE_PREFIX`, `EVENT_COLOR_ID`, `EVENT_LABEL_ID`, `USE_DEFAULT_REMINDERS`) feed the change-detection hash, so editing one re-writes every synced event on the next run rather than applying only to events that later change in Outlook.

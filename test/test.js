@@ -16,9 +16,9 @@ const feed = fs
 const parsed = gs.parseIcs(feed);
 const groups = gs.groupByUid(parsed.events);
 
-test('parses 7 VEVENTs into 6 UID groups', () => {
-  assert.equal(parsed.events.length, 7);
-  assert.equal(Object.keys(groups).length, 6);
+test('parses 9 VEVENTs into 7 UID groups', () => {
+  assert.equal(parsed.events.length, 9);
+  assert.equal(Object.keys(groups).length, 7);
 });
 
 test('folded and escaped description round-trips', () => {
@@ -46,8 +46,9 @@ test('RRULE passes through and EXDATE is re-emitted with an IANA TZID', () => {
 
 test('RECURRENCE-ID override groups under the master UID and converts to RFC3339', () => {
   const g = groups['AAMkAGRlY2Ix-recurring-1'];
-  assert.equal(g.overrides.length, 1);
-  const rid = g.overrides[0].props['RECURRENCE-ID'][0];
+  assert.equal(g.overrides.length, 2); // one moved occurrence, one cancelled
+  const moved = g.overrides.find(o => /moved/.test(gs.getProp(o, 'SUMMARY').value));
+  const rid = moved.props['RECURRENCE-ID'][0];
   const orig = gs.icsTimeToGoogle(rid.value, rid.params, parsed.tzMap);
   // August in Denver is UTC-6 (daylight time).
   assert.equal(gs.toRfc3339_(orig.dateTime, orig.timeZone), '2026-08-21T11:00:00-06:00');
@@ -117,8 +118,31 @@ test('content hash ignores DTSTAMP churn but detects real changes', () => {
   assert.notEqual(gs.contentHash_(titleChanged), h1);
 });
 
-test('cancelled master is detected', () => {
-  assert.equal(groups['cancelled-1'].master.props['STATUS'][0].value, 'CANCELLED');
+test('STATUS:CANCELLED master is detected', () => {
+  assert.equal(gs.isCancelled_(groups['cancelled-1'].master), true);
+});
+
+test('Exchange title-prefixed cancellation is detected despite STATUS:CONFIRMED', () => {
+  const master = groups['title-cancelled-1'].master;
+  assert.equal(gs.getProp(master, 'STATUS').value, 'CONFIRMED');
+  assert.equal(gs.isCancelled_(master), true);
+});
+
+test('title-prefixed cancellation of one occurrence is detected', () => {
+  const cancelledOverride = groups['AAMkAGRlY2Ix-recurring-1'].overrides
+    .find(o => /Canceled/.test(gs.getProp(o, 'SUMMARY').value));
+  assert.equal(gs.isCancelled_(cancelledOverride), true);
+});
+
+test('both English spellings match, and ordinary titles do not', () => {
+  const mk = summary => gs.parseIcs(
+    'BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:x\r\nSUMMARY:' + summary +
+    '\r\nEND:VEVENT\r\nEND:VCALENDAR').events[0];
+  assert.equal(gs.isCancelled_(mk('Cancelled: Standup')), true);
+  assert.equal(gs.isCancelled_(mk('Canceled: Standup')), true);
+  // A meeting *about* cancellations is not itself cancelled.
+  assert.equal(gs.isCancelled_(mk('Cancelled flights debrief')), false);
+  assert.equal(gs.isCancelled_(mk('Re: canceled: policy')), false);
 });
 
 test('quoted TZID parameter parses', () => {
