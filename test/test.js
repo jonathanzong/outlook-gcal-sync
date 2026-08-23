@@ -183,6 +183,41 @@ test('ownership check keeps masters and rejects recurring exceptions', () => {
   assert.equal(gs.isOwnedMaster_({ summary: 'Dinner' }), false);
 });
 
+test('transient API errors are retried, permanent ones are not', () => {
+  const retried = [
+    'API call to calendar.events.update failed with error: Rate Limit Exceeded',
+    'User Rate Limit Exceeded',
+    'Quota exceeded for quota metric',
+    'Backend Error',
+    'Service invoked too many times',   // matches "too many times"? see below
+    'The service is temporarily unavailable',
+    'Internal error encountered (500)'
+  ];
+  // "Service invoked too many times" is Apps Script's own quota message; it
+  // must be retried like Google's rate-limit wording.
+  retried.forEach(m => assert.equal(gs.isTransientApiError_(new Error(m)), true, m));
+  const notRetried = [
+    'Invalid start time',
+    'Not Found',
+    'Invalid value for: eventLabelId',
+    'Required parameter is missing'
+  ];
+  notRetried.forEach(m => assert.equal(gs.isTransientApiError_(new Error(m)), false, m));
+});
+
+test('backoff grows exponentially, stays jittered, and is capped', () => {
+  const lo = a => gs.backoffDelayMs_(a, () => 0);
+  const hi = a => gs.backoffDelayMs_(a, () => 0.999);
+  assert.equal(lo(1), 500);          // half the ceiling is the floor
+  assert.ok(hi(1) <= 1000);
+  assert.ok(lo(2) >= lo(1) * 2 - 1); // each attempt at least doubles
+  assert.ok(lo(4) > lo(3));
+  // Capped: attempt 20 must not exceed MAX_BACKOFF_MS (32s).
+  assert.ok(hi(20) <= 32000, 'uncapped backoff would exceed the run limit');
+  // Jitter spreads retries so parallel calls do not resynchronize.
+  assert.notEqual(lo(5), hi(5));
+});
+
 test('past-event guard: ended events read as past, ongoing series do not', () => {
   const cutoff = Date.UTC(2026, 7, 7); // 2026-08-07
   assert.equal(gs.eventEndedBefore_(

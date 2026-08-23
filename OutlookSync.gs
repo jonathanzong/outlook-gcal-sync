@@ -89,6 +89,19 @@ var EVENT_COLOR_ID = '';
 // STATUS alone.
 var CANCELLED_TITLE_PATTERN = /^\s*cancell?ed:\s*/i;
 
+// Retry and pacing. Google returns "Rate Limit Exceeded" for short bursts
+// of writes, which a full rewrite (a color change, a first sync) produces;
+// the fix is to retry with exponential backoff and to space writes out.
+var MAX_ATTEMPTS = 6;          // per API call, including the first try
+var BASE_BACKOFF_MS = 1000;    // first retry waits ~1s, then 2s, 4s, ...
+var MAX_BACKOFF_MS = 32000;
+var WRITE_PAUSE_MS = 120;      // pause after each write; 0 disables pacing
+
+// Apps Script kills a run at 6 minutes (30 on Workspace accounts). The sync
+// stops cleanly at this point and leaves the rest for the next run, which
+// picks up where this one stopped because unchanged events are skipped.
+var MAX_RUN_MS = 4.5 * 60 * 1000;
+
 // Outlook only publishes a rolling window (~6 months back). When a past
 // event ages out of that window it disappears from the feed; false keeps
 // such events on Google as history, true deletes them along with genuinely
@@ -255,6 +268,63 @@ var OFFSET_TO_DST_ZONE = {
   '120': 'Europe/Helsinki'
 };
 
+// --------------------------- API CALL WRAPPER ---------------------------
+
+var RUN_DEADLINE_ = null; // epoch ms; set at the start of each sync run
+
+/**
+ * True for errors worth retrying: quota and rate limits, and Google's
+ * transient backend failures. A malformed request is not retried.
+ */
+function isTransientApiError_(error) {
+  var text = String((error && error.message) || error);
+  // "Service invoked too many times" is Apps Script's own quota wording and
+  // must be retried alongside Google's rate-limit wording.
+  return /rate limit|ratelimit|quota|user rate|too many (requests|times)|backend error|internal error|transient|try again|temporarily unavailable|\b(429|500|502|503|504)\b/i
+    .test(text);
+}
+
+/**
+ * Exponential backoff with equal jitter: the wait lands between half the
+ * attempt's ceiling and the ceiling itself, so retries never exceed
+ * MAX_BACKOFF_MS and concurrent calls do not resynchronize. rand() is
+ * injectable for testing.
+ */
+function backoffDelayMs_(attempt, rand) {
+  var ceiling = Math.min(MAX_BACKOFF_MS, BASE_BACKOFF_MS * Math.pow(2, attempt - 1));
+  var half = ceiling / 2;
+  return Math.floor(half + (rand || Math.random)() * half);
+}
+
+/** Runs one API call, retrying transient failures. */
+function callApi_(label, fn) {
+  for (var attempt = 1; ; attempt++) {
+    try {
+      return fn();
+    } catch (e) {
+      if (attempt >= MAX_ATTEMPTS || !isTransientApiError_(e)) throw e;
+      var waitMs = backoffDelayMs_(attempt);
+      if (RUN_DEADLINE_ && Date.now() + waitMs > RUN_DEADLINE_) {
+        throw new Error('Out of time while backing off from ' + label + ': ' + e);
+      }
+      console.warn(label + ' hit a transient error (attempt ' + attempt + '/' +
+        MAX_ATTEMPTS + '), retrying in ' + waitMs + ' ms: ' + e);
+      Utilities.sleep(waitMs);
+    }
+  }
+}
+
+/** Like callApi_, plus the pacing pause that keeps bursts under the limit. */
+function writeApi_(label, fn) {
+  var result = callApi_(label, fn);
+  if (WRITE_PAUSE_MS) Utilities.sleep(WRITE_PAUSE_MS);
+  return result;
+}
+
+function outOfTime_() {
+  return !!RUN_DEADLINE_ && Date.now() > RUN_DEADLINE_;
+}
+
 // ----------------------------- ENTRY POINTS ----------------------------
 
 /** Run once by hand. Installs the timer and does the first sync. */
@@ -278,7 +348,9 @@ function removeTriggersAndSyncedEvents() {
   var existing = listManagedEvents_();
   Object.keys(existing).forEach(function (uid) {
     try {
-      Calendar.Events.remove(TARGET_CALENDAR_ID, existing[uid].id);
+      writeApi_('remove ' + uid, function () {
+        return Calendar.Events.remove(TARGET_CALENDAR_ID, existing[uid].id);
+      });
     } catch (e) {
       console.warn('Could not remove ' + uid + ': ' + e);
     }
@@ -293,7 +365,9 @@ function removeTriggersAndSyncedEvents() {
  * event with the wanted color in the Calendar UI first, then rerun.
  */
 function listEventLabels() {
-  var cal = Calendar.Calendars.get(TARGET_CALENDAR_ID);
+  var cal = callApi_('calendars.get', function () {
+    return Calendar.Calendars.get(TARGET_CALENDAR_ID);
+  });
   var labels = cal.labelProperties && cal.labelProperties.eventLabels;
   if (!labels || labels.length === 0) {
     console.log('No event labels found on this calendar yet. In the Calendar UI, set one event to the color you want, then run this again.');
@@ -313,7 +387,9 @@ function resyncAll() {
   var uids = Object.keys(managed);
   uids.forEach(function (uid) {
     try {
-      Calendar.Events.remove(TARGET_CALENDAR_ID, managed[uid].id);
+      writeApi_('remove ' + uid, function () {
+        return Calendar.Events.remove(TARGET_CALENDAR_ID, managed[uid].id);
+      });
     } catch (e) {
       console.warn('Could not remove ' + uid + ': ' + e);
     }
@@ -337,6 +413,7 @@ function sync() {
 }
 
 function syncLocked_() {
+  RUN_DEADLINE_ = Date.now() + MAX_RUN_MS;
   var response = UrlFetchApp.fetch(getIcsUrl_(), {
     muteHttpExceptions: true,
     followRedirects: true,
@@ -366,9 +443,15 @@ function syncLocked_() {
     return;
   }
 
-  var stats = { created: 0, updated: 0, unchanged: 0, deleted: 0, overridesPatched: 0, errors: 0 };
+  var stats = { created: 0, updated: 0, unchanged: 0, deleted: 0,
+                overridesPatched: 0, errors: 0, deferred: 0 };
 
   Object.keys(groups).forEach(function (uid) {
+    // Retries and pacing cost wall-clock time, so a large rewrite can run
+    // past the Apps Script execution limit. Stop before being killed: the
+    // remaining events sync on the next run, which skips everything this
+    // run already wrote.
+    if (outOfTime_()) { stats.deferred++; return; }
     try {
       syncOneGroup_(uid, groups[uid], parsed.tzMap, existing, stats);
     } catch (e) {
@@ -382,10 +465,12 @@ function syncLocked_() {
   // Outlook's published window, not because anyone cancelled them.
   var pastCutoff = Date.now() - 24 * 3600 * 1000;
   Object.keys(existing).forEach(function (uid) {
-    if (groups[uid]) return;
+    if (groups[uid] || outOfTime_()) return;
     if (!DELETE_PAST_EVENTS && eventEndedBefore_(existing[uid], pastCutoff)) return;
     try {
-      Calendar.Events.remove(TARGET_CALENDAR_ID, existing[uid].id);
+      writeApi_('remove ' + uid, function () {
+        return Calendar.Events.remove(TARGET_CALENDAR_ID, existing[uid].id);
+      });
       stats.deleted++;
     } catch (e) {
       stats.errors++;
@@ -400,8 +485,12 @@ function syncLocked_() {
     ', unchanged: ' + stats.unchanged +
     ', deleted: ' + stats.deleted +
     ', instance overrides patched: ' + stats.overridesPatched +
-    ', errors: ' + stats.errors
+    ', errors: ' + stats.errors +
+    ', deferred to next run: ' + stats.deferred
   );
+  if (stats.deferred > 0) {
+    console.warn(stats.deferred + ' events did not fit in this run and sync on the next one.');
+  }
 }
 
 // --------------------------- PER-EVENT SYNC ----------------------------
@@ -425,7 +514,9 @@ function syncOneGroup_(uid, group, tzMap, existing, stats) {
   // A cancelled master means the whole series is gone.
   if (group.master && isCancelled_(group.master)) {
     if (prior) {
-      Calendar.Events.remove(TARGET_CALENDAR_ID, prior.id);
+      writeApi_('remove ' + uid, function () {
+        return Calendar.Events.remove(TARGET_CALENDAR_ID, prior.id);
+      });
       stats.deleted++;
     }
     return;
@@ -458,13 +549,19 @@ function syncOneGroup_(uid, group, tzMap, existing, stats) {
   if (prior) {
     resource.id = prior.id;
     try {
-      saved = Calendar.Events.update(resource, TARGET_CALENDAR_ID, prior.id, labelArgs);
+      saved = writeApi_('update ' + uid, function () {
+        return Calendar.Events.update(resource, TARGET_CALENDAR_ID, prior.id, labelArgs);
+      });
     } catch (e) {
       // The stored copy cannot accept this resource (a shape Google will not
       // convert in place, or a copy an earlier version of this script wrote
       // wrongly). Replace it: the script owns every event it deletes here.
       console.warn('Update of ' + uid + ' failed (' + e + '); replacing the event.');
-      try { Calendar.Events.remove(TARGET_CALENDAR_ID, prior.id); } catch (e2) {}
+      try {
+        writeApi_('remove ' + uid, function () {
+          return Calendar.Events.remove(TARGET_CALENDAR_ID, prior.id);
+        });
+      } catch (e2) {}
       delete resource.id;
       saved = createEvent_(resource, labelArgs);
     }
@@ -481,11 +578,15 @@ function syncOneGroup_(uid, group, tzMap, existing, stats) {
 
 /** Imports one event, then applies the label (import ignores labels). */
 function createEvent_(resource, labelArgs) {
-  var saved = Calendar.Events.import(resource, TARGET_CALENDAR_ID);
+  var saved = writeApi_('import ' + resource.iCalUID, function () {
+    return Calendar.Events.import(resource, TARGET_CALENDAR_ID);
+  });
   if (EVENT_LABEL_ID) {
-    saved = Calendar.Events.patch(
-      { eventLabelId: String(EVENT_LABEL_ID) },
-      TARGET_CALENDAR_ID, saved.id, labelArgs);
+    saved = writeApi_('label ' + saved.id, function () {
+      return Calendar.Events.patch(
+        { eventLabelId: String(EVENT_LABEL_ID) },
+        TARGET_CALENDAR_ID, saved.id, labelArgs);
+    });
   }
   return saved;
 }
@@ -501,7 +602,9 @@ function patchOverride_(masterEvent, override, tzMap, stats) {
   } else {
     listArgs = { originalStart: toRfc3339_(origStart.dateTime, origStart.timeZone) };
   }
-  var instances = Calendar.Events.instances(TARGET_CALENDAR_ID, masterEvent.id, listArgs);
+  var instances = callApi_('instances of ' + masterEvent.id, function () {
+    return Calendar.Events.instances(TARGET_CALENDAR_ID, masterEvent.id, listArgs);
+  });
   if (!instances.items || instances.items.length === 0) {
     console.warn('No instance found for override at ' + recId.value + ' of "' +
       (masterEvent.summary || '') + '" — skipping this override.');
@@ -522,8 +625,10 @@ function patchOverride_(masterEvent, override, tzMap, stats) {
     instance.status = 'confirmed';
   }
   if (EVENT_LABEL_ID) instance.eventLabelId = String(EVENT_LABEL_ID);
-  Calendar.Events.update(instance, TARGET_CALENDAR_ID, instance.id,
-    EVENT_LABEL_ID ? { eventLabelVersion: 1 } : {});
+  writeApi_('override ' + instance.id, function () {
+    return Calendar.Events.update(instance, TARGET_CALENDAR_ID, instance.id,
+      EVENT_LABEL_ID ? { eventLabelVersion: 1 } : {});
+  });
   stats.overridesPatched++;
 }
 
@@ -851,12 +956,14 @@ function listManagedEvents_() {
   var byUid = {};
   var pageToken = null;
   do {
-    var page = Calendar.Events.list(TARGET_CALENDAR_ID, {
-      privateExtendedProperty: 'icsSyncTag=' + SYNC_TAG,
-      showDeleted: false,
-      singleEvents: false,
-      maxResults: 2500,
-      pageToken: pageToken
+    var page = callApi_('events.list', function () {
+      return Calendar.Events.list(TARGET_CALENDAR_ID, {
+        privateExtendedProperty: 'icsSyncTag=' + SYNC_TAG,
+        showDeleted: false,
+        singleEvents: false,
+        maxResults: 2500,
+        pageToken: pageToken
+      });
     });
     (page.items || []).forEach(function (ev) {
       if (!isOwnedMaster_(ev)) return;

@@ -42,6 +42,10 @@ The script also never expands recurrences. The RRULE line passes to Google verba
 
 **Multi-value and multi-line EXDATEs.** EXDATE values are collected across lines, split on commas, and re-grouped by mapped timezone before re-emission.
 
+**Rate limits.** Google rejects short bursts of writes with `Rate Limit Exceeded`, which a full rewrite produces (a first sync, or a color change that invalidates every hash). Every API call goes through a wrapper that retries transient failures — rate limits, quota errors, and Google's 5xx backend errors — with exponential backoff and equal jitter, up to 6 attempts, capped at 32 seconds per wait. Apps Script's own `Service invoked too many times` counts as transient too. A malformed request is not retried, since retrying cannot fix it. Writes are also paced (`WRITE_PAUSE_MS`, 120 ms) so a large rewrite stays under the limit instead of relying on retries.
+
+**The execution time limit.** Apps Script kills a run at 6 minutes (30 on Workspace accounts), and retries plus pacing cost wall-clock time. The sync stops at `MAX_RUN_MS` (4.5 minutes) and logs how many events it deferred. The next run finishes them, because events already written are skipped by their content hash. Being killed mid-run is safe for the same reason, but a clean stop keeps the log readable.
+
 ## Safety properties
 
 Every event the script creates carries a private tag (`icsSyncTag`), and the deletion pass queries by that tag, so the script structurally cannot touch events you created yourself. If the feed fetch fails, returns non-ICS content, or parses to zero events while synced events exist (an expired link or publishing turned off, not a suddenly empty calendar), the run aborts without deleting anything. A script lock prevents two runs from overlapping. Per-event errors are caught and logged; one malformed event cannot stop the rest of the sync. Every run logs a summary line (created/updated/unchanged/deleted/errors), so a breakage shows up in the execution log rather than as silent drift.
@@ -71,6 +75,11 @@ To uninstall, run `removeTriggersAndSyncedEvents`, which deletes the trigger and
 | `EVENT_LABEL_ID` | `''` | Event-label id for synced events — the current palette (24 named colors such as Mango, plus custom RGB shades). Label ids are per-calendar: run `listEventLabels()` once and copy the id from the log. Wins over `EVENT_COLOR_ID`. |
 | `EVENT_COLOR_ID` | `''` | Classic colorId `'1'`–`'11'`. `''` on both color settings keeps the calendar's default color. |
 | `CANCELLED_TITLE_PATTERN` | `/^\s*cancell?ed:\s*/i` | Titles matching this are treated as cancelled meetings and kept off Google. Set to `null` to rely on `STATUS:CANCELLED` alone. |
+| `MAX_ATTEMPTS` | `6` | Tries per API call, including the first. |
+| `BASE_BACKOFF_MS` | `1000` | First retry waits about a second; each attempt doubles the ceiling. |
+| `MAX_BACKOFF_MS` | `32000` | Longest single backoff wait. |
+| `WRITE_PAUSE_MS` | `120` | Pause after each write. `0` disables pacing and leans on retries alone. |
+| `MAX_RUN_MS` | `270000` | Stop and defer the rest to the next run at this point. Raise it on a Workspace account, where runs may last 30 minutes. |
 | `DELETE_PAST_EVENTS` | `false` | `false` keeps ended events on Google when they age out of Outlook's published window; `true` deletes them. |
 
 The presentation settings (`TITLE_PREFIX`, `EVENT_COLOR_ID`, `EVENT_LABEL_ID`, `USE_DEFAULT_REMINDERS`) feed the change-detection hash, so editing one re-writes every synced event on the next run rather than applying only to events that later change in Outlook.
